@@ -1,0 +1,124 @@
+---
+title: "RNASeq TSPOKO vs WT splitlm~genotype"
+author: 'Author: Lai,Kei Onn (Barron Lab) and Giuseppe D Agostino (Langley Lab)'
+date: "10/22/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+Loading Packages
+```{r}
+library(DESeq2)
+library(dplyr)
+library(tibble)
+library(tximeta)
+library(magrittr)
+library(org.Mm.eg.db)
+library(tibble)
+library(tidyr)
+```
+Pseudoalignment with Tximeta;
+There are 4 sample groups in total
+WT injected with PBS, WT injected with LPS,
+TSPOKO injected with PBS, TSPO-KO injected with LPS.
+
+2 Factors are involved in study design: genotype(WT, TSPOKO (KO)) and con or condition (PBS, LPS)
+```{r}
+se<-tximeta(coldata)
+edb <- retrieveDb(se)
+se.exons <- addExons(se)
+gse <- summarizeToGene(se)
+gse <- addIds(gse, "REFSEQ", gene=TRUE)
+
+##con refers to "condition" factor which consists of levels PBS and LPS.
+gse$con %<>% relevel("PBS")
+gse$genotype %<>% relevel("WT")
+levels(gse$con)
+round( colSums(assay(gse)) / 1e6, 1 )
+```
+
+From our counts file,
+Differential expression in DESeq2, isolating by condition for each genotype. 
+We get counts from gse (summarized experiment) from Tximeta package.
+
+We then isolate by condition for each genotype for differential expression
+
+```{r}
+coldata <- colData(gse)
+counts.rna<-assay(gse)[["counts"]]
+counts.pbs <- counts.rna[,coldata$con == "PBS","names"]
+counts.lps <- counts.rna[,coldata$con== "LPS","names"]
+coldata.pbs<- coldata[colnames(counts.pbs),]
+coldata.lps <- coldata[colnames(counts.lps),]
+
+#designmatrix contrasting KOPBS- WTPBS
+dds.pbs <- DESeqDataSetFromMatrix(countData = counts.pbs, colData = coldata.pbs, design = ~genotype)
+
+#designmatrix contrasting KOLPS- WTLPS
+dds.lps <- DESeqDataSetFromMatrix(countData = counts.lps, colData = coldata.lps, design = ~genotype)
+dds.pbs$genotype <- relevel(dds.pbs$genotype, ref = "WT")
+dds.lps$genotype <- relevel(dds.lps$genotype, ref = "WT")
+
+
+dds.pbs <- DESeq(dds.pbs)
+dds.lps <- DESeq(dds.lps)
+
+```
+
+Getting results of differential expressions
+```{r}
+res.dds.pbs <- results(dds.pbs, contrast = c("genotype", "KO", "WT"), alpha = 0.05)
+res.dds.lps <- results(dds.lps, contrast = c("genotype", "KO", "WT"), alpha = 0.05)
+
+res.dds.pbs.sh <- lfcShrink(dds.pbs, res = res.dds.pbs, contrast = c("genotype", "KO", "WT"), type = "ashr")
+res.dds.lps.sh <- lfcShrink(dds.lps, res = res.dds.lps, contrast = c("genotype", "KO", "WT"), type = "ashr")
+
+res.dds.pbs.sh <- as.data.frame(res.dds.pbs.sh, stringsAsFactors = FALSE)
+res.dds.lps.sh<- as.data.frame(res.dds.lps.sh, stringsAsFactors = FALSE)
+
+
+res.dds.pbs.sh$stat <- res.dds.pbs[rownames(res.dds.pbs.sh), "stat"]
+res.dds.lps.sh$stat <- res.dds.lps[rownames(res.dds.lps.sh),"stat"]
+
+```
+
+
+Here we annotate genes within the result dataframe from differential expression with Ensembl IDs
+```{r}
+
+#make symvbols as rownames of res df
+res.dds.pbs.sh<-merge(res.dds.pbs.sh,bm,by.x="row.names",by.y="ensembl_gene_id",all.x=TRUE)
+
+res.dds.lps.sh<-merge(res.dds.lps.sh,bm,by.x="row.names",by.y="ensembl_gene_id",all.x=TRUE)
+
+
+# Wrangling to set ensembl IDs as rownames of the biomaRt object
+nonduppbs<-which(duplicated(res.dds.pbs.sh$mgi_symbol) == FALSE)
+res.dds.pbs.sh<-res.dds.pbs.sh[nonduppbs,]
+res.dds.pbs.sh<-res.dds.pbs.sh[complete.cases(res.dds.pbs.sh),]
+rownames(res.dds.pbs.sh)<-res.dds.pbs.sh$mgi_symbol
+
+
+nonduplps<-which(duplicated(res.dds.lps.sh$mgi_symbol) == FALSE)
+res.dds.lps.sh<-res.dds.lps.sh[nonduplps,]
+res.dds.lps.sh<-res.dds.lps.sh[complete.cases(res.dds.lps.sh),]
+rownames(res.dds.lps.sh)<-res.dds.lps.sh$mgi_symbol
+
+```
+
+Here concludes the workflow for RNAseq using Tximeta (Love et al., 2020) for transcript quantification and DESEQ2 package (Love et al., 2014) for differential expression.
+
+Love, M.I., Huber, W. & Anders, S. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biol 15, 550 (2014). https://doi.org/10.1186/s13059-014-0550-8
+
+Love MI, Soneson C, Hickey PF, Johnson LK, Pierce NT, Shepherd L, Morgan M, Patro R (2020). “Tximeta: Reference sequence checksums for provenance identification in RNA-seq.” PLOS Computational Biology, 16, e1007664. doi: 10.1371/journal.pcbi.1007664.
+
+Final Output from this workflow "res.dds.lps.sh.Rdata" is saved as input for the next script for Gene set enrichment 
+
+
+
+ 
+ 

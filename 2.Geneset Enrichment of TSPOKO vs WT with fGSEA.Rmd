@@ -1,0 +1,143 @@
+---
+title: "2.Geneset Enrichment of TSPOKO vs WT with fGSEA"
+author: "Giuseppe D' Agostino (Langley Lab) and Lai, Kei Onn (Barron Lab)"
+date: "11/21/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Read in the `DESeq2` results
+
+```{r read_counts}
+res.dds.lps.sh <- readRDS(file = "res_lps_sh.RDS")
+```
+
+Rank by the Wald test statistic
+
+```{r rank}
+lps.ranks.frame <- res.dds.lps.sh %>% 
+  dplyr::select(entrezgene_id, stat) %>% 
+  na.omit() %>% 
+  distinct() %>% 
+  group_by(entrezgene_id) %>% 
+  summarize(stat=mean(stat))
+
+lps.ranks <- deframe(lps.ranks.frame)
+```
+
+We get all the genesets in Gene Ontology (C5)
+
+```{r get_genesets}
+go.genesets <- msigdbr(species = "Mus musculus", category = "C5")
+```
+
+Prepare a list of genesets and convert IDs to Entrez
+
+```{r wrangle_ids}
+go.genesets = as.data.frame(go.genesets, stringsAsFactors = FALSE)
+go.genesets$entrez_gene = as.character(go.genesets$entrez_gene)
+go.list <- lapply(unique(go.genesets$gs_name), function(x) go.genesets[go.genesets$gs_name == x, "entrez_gene"])
+names(go.list) = unique(go.genesets$gs_exact_source)  ##IMPORTANT: use gs_exact_source to retain the GO ID
+```
+
+
+Run `fgsea`
+
+```{r run_fgsea}
+fgsea.lps.go <- fgsea(pathways = go.list, 
+                      stats = lps.ranks,
+                      nperm = 10000,
+                      BPPARAM = SnowParam())
+```
+
+
+Add names and subcategories to the fgsea results table
+
+```{r}
+goid_to_name <- as.data.frame(cbind(unique(go.genesets$gs_exact_source), unique(go.genesets$gs_name)))
+goid_and_subcat <- as.data.frame(unique(go.genesets[,c("gs_subcat", "gs_exact_source")]))
+rownames(goid_and_subcat) <- goid_and_subcat$gs_exact_source
+colnames(goid_to_name) <- c("GO_ID", "name")
+rownames(goid_to_name) <- goid_to_name$GO_ID
+goid_to_name$subcat <- goid_and_subcat[rownames(goid_and_subcat), "gs_subcat"]
+
+fgsea.lps.go$name <- goid_to_name[fgsea.lps.go$pathway, "name"]
+fgsea.lps.go$subcat <- goid_to_name[fgsea.lps.go$pathway, "subcat"]
+fgsea.lps.go$subcat <- gsub(fgsea.lps.go$subcat, pattern = "GO:", replacement = "")
+
+fgsea.lps.go <- fgsea.lps.go[fgsea.lps.go$subcat != "HPO"] # we remove HP terms because they are not in the GO graph
+fgsea.lps.go$padj <- p.adjust(fgsea.lps.go$pval, method = "fdr")
+```
+
+
+Here is the `fgsea` result pruning function: treats significant and non-significant categories separately. 
+
+- Non-significant categories are only kept if they don't have children categories.
+
+- Significant categories are only kept if they do not have enriched children categories
+
+- Adjusted p-values are recalculated on the nominal p-values from the pruned categories.
+
+```{r prune_function}
+pruneGO_FGSEA <- function(fgsea_res, 
+                         go_sub = c("BP", "MF", "CC"),
+                         alpha = 0.05){
+  
+  fgsea_res <- fgsea_res[which(fgsea_res$subcat == go_sub),]
+
+  if(go_sub == "BP") go_subcategory = GOBPCHILDREN 
+    else  if(go_sub == "MF") go_subcategory = GOMFCHILDREN
+    else  if(go_sub == "CC") go_subcategory = GOCCCHILDREN 
+  
+  go_children <- as.list(go_subcategory)
+  go_haschildren <- go_children[!is.na(go_children)]
+  
+  fgsea_res$has_children <- sapply(fgsea_res$pathway, function(x) x %in% names(go_haschildren))
+
+  fgsea_res_sig <- fgsea_res[fgsea_res$pval < alpha,]
+
+  fgsea_res_sig$has_sig_children <- sapply(fgsea_res_sig$pathway, 
+                                            function(x) any(go_haschildren[[x]] %in% fgsea_res_sig$pathway))
+   
+  fgsea_res_sig$keep <- (fgsea_res_sig$has_children == FALSE) | (fgsea_res_sig$has_children == TRUE & fgsea_res_sig$has_sig_children == FALSE) 
+  
+  fgsea_res_ns_childless <- fgsea_res[which(fgsea_res$pval >= alpha & !fgsea_res$has_children),]
+
+  pruned <- rbind(fgsea_res_sig[fgsea_res_sig$keep,1:11], fgsea_res_ns_childless[,1:11])
+  
+  pruned$padj_2 <- p.adjust(pruned$pval, method = "fdr")
+  
+  pruned_len <- length(setdiff(pruned$pathway, fgsea_res_sig$pathway))
+  message("Pruned ", pruned_len, " terms.")
+  
+  return(pruned)
+  
+ }
+```
+
+Prune separately by different subcategory (necessary to look for children in the right DAG)
+
+```{r}
+fgsea.lps.go.bp.pruned <- pruneGO_FGSEA(fgsea.lps.go, go_sub = "BP", alpha = 0.05)
+fgsea.lps.go.mf.pruned <- pruneGO_FGSEA(fgsea.lps.go, go_sub = "MF", alpha = 0.05)
+fgsea.lps.go.cc.pruned <- pruneGO_FGSEA(fgsea.lps.go, go_sub = "CC", alpha = 0.05)
+```
+
+Join all tables and perform (without overwriting) fdr correction
+
+```{r join_tables}
+fgsea.lps.go.all.pruned <- rbind(fgsea.lps.go.bp.pruned, fgsea.lps.go.mf.pruned, fgsea.lps.go.cc.pruned)
+fgsea.lps.go.all.pruned$padj_3 <- p.adjust(fgsea.lps.go.all.pruned$pval, method = 'fdr')
+```
+
+Check nominal p value histogram as sanity check
+
+```{r pval_hist}
+hist(fgsea.lps.go.all.pruned$pval)
+```
+
+Significant Gene set enrichment terms are determined using the "padj_2"  column which test for FDR significance based on subcategory of GO (i.e. either CC/BP/MF) using threshold <0.05.
+Object " fgsea.lps.go.all.pruned.RDS" with terms <0.05 under "padj_2" column is exported as excel file as Supplementary Table 3
