@@ -1,0 +1,136 @@
+---
+title: "3. Heatmap of geneset enrichment"
+author: "Lai, Kei Onn (Barron Lab)"
+date: "11/21/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading required packages
+we are using Complex Heatmap as main package for plotting
+Heatmap
+
+Gu Z, Eils R, Schlesner M (2016). “Complex heatmaps reveal patterns and correlations in multidimensional genomic data.” Bioinformatics.
+```{r}
+require(RColorBrewer)
+require(ComplexHeatmap)
+require(circlize)
+require(digest)
+require(cluster)
+library(DESeq2)
+library(dplyr)
+library(ComplexHeatmap)
+```
+There are mainly two groups of inputs we need
+Firstly, the countdata and coldata(metadata) we have generated from
+1-RNAseq TSPOKO vs WT Differential Expression_RMarkdown_github.Rmd
+secondly, the leadingedges of fgsea terms that are significant from the Supplementary Table that we got from 2.Geneset Enrichment TSPOKO vs WT with fGSEA.Rmd
+
+
+
+```{Load required Objects}
+load('heatmapinput.RData')
+```
+
+Extracting Countdata from the dds object
+```{r}
+vsd <- vst(dds.lps, blind=FALSE)
+mat<- assay(vsd)
+mat=merge(mat,bm,all.x=TRUE,by.x=0,by.y="ensembl_gene_id")
+
+mat=mat[!duplicated(mat$mgi_symbol),]
+mat=mat[complete.cases(mat),]
+row.names(mat)=mat$mgi_symbol
+mat<- subset(mat, select = -c(Row.names,mgi_symbol))
+```
+
+Creating a function to calculate z-score
+for the heatmap
+
+```{r}
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+
+```
+
+```{r}
+counts.lps<- t(apply(mat, 1, cal_z_score))
+
+coldata.lps=colData(dds.lps)
+
+coldata.lps$group <- factor(coldata.lps$group, levels = c('WT LPS', 'KO LPS'))
+
+
+coldata.lps <- colData(dds.lps)[colnames(counts.lps),]
+coldata.lps=coldata.lps[order(coldata.lps$group),]
+counts.lps=counts.lps[,match(row.names(coldata.lps),colnames(counts.lps))]
+colnames(counts.lps)==rownames(coldata.lps)
+```
+
+read in the xlsx file of genesfgsea250321.xlsx
+which contains the fgsea output from 2.Geneset Enrichment TSPOKO vs WT with fGSEA.Rmd
+
+```{r}
+uniquegenes<-unique(genesfgsea250321$external_gene_name)
+mat.counts.lpsy.fgsea=subset(counts.lps, rownames(counts.lps) %in% uniquegenes)
+
+```
+
+Remove duplicated fgsea leading edges to allow heatmap plotting
+with unique colnames
+```{r}
+mygenecol=genesfgsea250321[genesfgsea250321$external_gene_name%in%row.names(mat.counts.lpsy.fgsea),c("1stgroup","2ndgroup","external_gene_name")]
+mygenecol2=mygenecol[,-2]
+mygenecol2=mygenecol2%>% distinct(mygenecol2$external_gene_name, .keep_all = TRUE)
+mygenecol2=data.frame(mygenecol2)
+#solves the problem of setting rownames deprecated by converting to df
+rownames(mygenecol2)=mygenecol2$external_gene_name
+#retains 1dim df instead of converting vector by drop=FALSE
+mygenecol2=mygenecol2[,-2,drop=FALSE]
+
+```
+
+Creating Sample columns for the heatmap
+```{r}
+my_sample_col <- data.frame(coldata.lps$names,coldata.lps$group)
+row.names(my_sample_col) <- coldata.lps$names
+my_sample_col=my_sample_col[,-1,drop=FALSE]
+
+```
+
+reorder the countmatrix based on the order of leading edges in fgsea
+in mygenecol2
+```{r}
+mat.counts.lpsy.fgsea<-mat.counts.lpsy.fgsea[rownames(mygenecol2), ]
+```
+
+Plotting of Heatmap-Finally!
+```{r}
+myCol <- colorRampPalette(c('dodgerblue', 'black', 'yellow'))(100)
+myBreaks <- seq(-3, 3, length.out = 100)
+heatmap=Heatmap(mat.counts.lpsy.fgsea, name = "Z-score counts", col = myCol,column_title = "%s",cluster_rows = FALSE,show_column_dend = FALSE,row_split = mygenecol2,column_split = my_sample_col,row_title_rot = 0,column_km = 1,
+                left_annotation = rowAnn,row_names_gp =gpar(fontsize=2))
+my_sample_col=my_sample_col %>% 
+  rename(
+    genotype = coldata.lps.group)
+genotypecolors=list(genotype=c("WT LPS"="#99CCFF","KO LPS"="#FF6666"))
+
+
+
+mygenecol2=mygenecol2 %>% 
+  rename(
+    themes = X1stgroup)
+
+themecolors=list(themes=c("Lipid metabolism"="#33CCFF","Mitochondrial metabolism"="#66FF66","Immune and inflammatory pathways"="#FF3333"))
+
+colAnn <- HeatmapAnnotation(df=my_sample_col,which = "col",col=genotypecolors)
+rowAnn <- HeatmapAnnotation(df=mygenecol2,which = "row",col=themecolors)
+require(RColorBrewer)
+
+genotype=c("WT LPS","KO LPS")
+```
+
